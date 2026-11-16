@@ -1,0 +1,4 @@
+.DS_Store
+seagate-capture.pid
+seagate-capture.state
+seagate-capture.state.tmp

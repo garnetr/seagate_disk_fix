@@ -1,0 +1,8 @@
+# Error log for the Seagate media test.
+# A file that is only slow, and only needs a second read, is not an error.
+# Recorded here: a mismatch, a partial file left in place, a rename failure,
+# a batch or group line with a non-zero bad count, and any single-file I/O
+# of 15.000 seconds or more. That 15 second case is the USB-bridge stall.
+# A second read that matches does not get a third read and is not listed.
+# Scan of 289810 detail-log bytes: bad_lines=0 stall_lines=0.
+# Last scanned detail line: R 13484 read_s=4.393 MBps=113.8 good-but-slow
