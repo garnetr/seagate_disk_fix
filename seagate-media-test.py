@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Seagate 8 TB media test.
+"""Seagate 8 TB media test. Version 0.91.
 
 Run this script. It compiles seagate-media-test.c when it needs to, and it
-refuses to start a second writer. The C binary is the same test that has been
-running: 499,998,720-byte patterned files, uncached reads and writes, a 4.5
-second slow-write rule, a second read only for the slow files, and a statistics
+refuses to start a second writer. The test writes 499,998,720-byte patterned
+files, reads them back uncached, treats a write of 4.5 seconds or more as
+slow, reads those files again at the end of the group, and prints a statistics
 line every ten files.
 
 How to run it
@@ -31,38 +31,47 @@ How to run it
       500 and the default slow line is 4.5 seconds.
 
   python3 seagate-media-test.py watch
-      Follow seagate-screen.log. Stopping watch does not stop the writer.
+      Follow the logs. Stopping watch does not stop the writer.
 
   python3 seagate-media-test.py status
-      Writer pid, last screen line, and how many error-log lines exist.
+      Writer pid, last normal line, warning count, and error count.
+
+  python3 seagate-media-test.py classify
+      Read the detail log of the run that is already going and fill
+      seagate-normal.log and seagate-warnings.log. It does not start a writer.
+      Serious lines are appended to the error log only when they are not
+      already there.
 
   python3 seagate-media-test.py capture-live
       Copy the screen of the run that is already going, then keep appending.
       That run was started before this script existed, so its screen was in
       /tmp. /tmp is lost on reboot. This command keeps a copy in this folder.
+      Do not start it a second time while its copier is already running.
 
   python3 seagate-media-test.py self-test
       Check the free-space arithmetic against the count made before this run.
       It does not touch the drive.
 
-Logs in this folder
-  seagate-screen.log    Everything that has gone to the screen.
-  seagate-detail.log    One line per file, plus the same screen lines.
-                        The screen line does not name every file's time.
-                        This file does, so a later pass can analyze it.
-  seagate-errors.log    Failures only. A slow file that only needs a second
-                        read is not an error and is not written here.
-  seagate-times.txt     Write times for a later run. The running test keeps
-                        its own copy in /tmp and this file does not replace it.
-  seagate-capture.log   Notes from the copier that follows the running test.
-                        This is not test output.
+Logs for a run you start with this version
+  seagate-normal.log    Everything that is fine. A slow write is fine.
+                        Needing a second read is fine. Both stay here.
+  seagate-warnings.log  A read or a second read of 4.000 seconds or more
+                        that still matched. It is not a failure. A second
+                        read that matches does not get a third read.
+  seagate-errors.log    Anything more serious: a mismatch, a partial file
+                        left in place, a rename failure, a non-zero bad
+                        count, or any single-file read or write of 15.000
+                        seconds or more. That 15 second case is the
+                        USB-bridge failure.
 
-What goes in the error log
-  A mismatch, a partial file left in place, a rename failure, a batch or
-  group line with a non-zero bad count, and any single-file read or write of
-  15.000 seconds or more. That 15 second case is the USB-bridge failure: a
-  read can return a zero sector and still say the read worked. A matching
-  second read is not listed, and it does not get a third read.
+Logs already being filled by the run that is in progress
+  seagate-screen.log    Screen lines copied from that run.
+  seagate-detail.log    One line per file from that run.
+  seagate-errors.log    Serious lines from that run. It stays empty while
+                        every file matches and no read or write hits 15 seconds.
+  seagate-times.txt     Write times for a later run. The running test keeps
+                        its own copy in /tmp.
+  seagate-capture.log   Notes from the copier. This is not test output.
 
 What the test does
   Each file is (500000000 / 4096) * 4096 = 499998720 bytes. The write and the
@@ -104,7 +113,10 @@ SOURCE = os.path.join(HERE, "seagate-media-test.c")
 BINARY = os.path.join(HERE, "seagate-media-test-bin")
 SCREEN = os.path.join(HERE, "seagate-screen.log")
 DETAIL = os.path.join(HERE, "seagate-detail.log")
+NORMAL = os.path.join(HERE, "seagate-normal.log")
+WARNINGS = os.path.join(HERE, "seagate-warnings.log")
 ERRORS = os.path.join(HERE, "seagate-errors.log")
+SLOW_READ = Decimal("4.000")
 TIMES = os.path.join(HERE, "seagate-times.txt")
 STATE = os.path.join(HERE, "seagate-capture.state")
 PIDFILE = os.path.join(HERE, "seagate-capture.pid")
@@ -205,6 +217,7 @@ def historical_plan_ok() -> None:
     samples = {
         "W 12892 total_s=10.279 MBps=48.6": set(),
         "SECOND 12326 read_s=8.180 MBps=61.1 OK": set(),
+        "R 13350 read_s=3.999 MBps=125.0 good": set(),
         "R 13350 read_s=4.887 MBps=102.3 good-but-slow": set(),
         "BAD W 11002 partial left in place": {"bad"},
         "BAD R 00001 read_s=15.100 bad_bytes=4": {"bad", "stall"},
@@ -218,11 +231,29 @@ def historical_plan_ok() -> None:
         "ALL DONE files=4500 elapsed_s=10 bad=0": set(),
         "ALL DONE files=5000 elapsed_s=10 bad=1": {"bad"},
         "READ 13341-13350 min_s=4.400 median_s=4.437 mean_s=4.512 max_s=4.887 MBps=110.8 elapsed_s=2330 bad=0": set(),
+        "READ 00001-00010 min_s=3.100 median_s=3.200 mean_s=3.200 max_s=3.999 MBps=150.0 elapsed_s=32 bad=0": set(),
+    }
+    classes = {
+        "W 12892 total_s=10.279 MBps=48.6": "normal",
+        "SECOND 12326 read_s=8.180 MBps=61.1 OK": "warning",
+        "R 13350 read_s=3.999 MBps=125.0 good": "normal",
+        "R 13350 read_s=4.000 MBps=125.0 good": "warning",
+        "R 13350 read_s=4.887 MBps=102.3 good-but-slow": "warning",
+        "BAD W 11002 partial left in place": "error",
+        "W 00001 total_s=15.000 MBps=33.3": "error",
+        "READ 13341-13350 min_s=4.400 median_s=4.437 mean_s=4.512 max_s=4.887 MBps=110.8 elapsed_s=2330 bad=0": "warning",
+        "READ 00001-00010 min_s=3.100 median_s=3.200 mean_s=3.200 max_s=3.999 MBps=150.0 elapsed_s=32 bad=0": "normal",
+        "WRITE 00001-00010 min_s=4.500 median_s=4.600 mean_s=4.600 max_s=5.000 MBps=100.0 elapsed_s=50 bad=0": "normal",
+        "ALL DONE files=4500 elapsed_s=10 bad=0": "normal",
     }
     for line, expect in samples.items():
         got = error_kinds(line)
         if got != expect:
             raise SystemExit(f"error class drifted for {line!r}: {got} != {expect}")
+    for line, expect in classes.items():
+        got = log_class(line)
+        if got != expect:
+            raise SystemExit(f"log class drifted for {line!r}: {got} != {expect}")
 
 
 def processes():
@@ -325,6 +356,31 @@ def error_kinds(line: str) -> set[str]:
         if all(v is not None for v in counts) and any(v != 0 for v in counts):
             kinds.add("bad")
     return kinds
+
+
+def is_slow_read(line: str) -> bool:
+    """A matching read at 4.000 seconds or more, and under the 15 second stall."""
+    text = line.strip()
+    if not text or text.startswith("#") or error_kinds(text):
+        return False
+    parts = text.split()
+    if len(parts) < 2:
+        return False
+    per_file = parts[0] == "R" or (parts[0] == "SECOND" and "-" not in parts[1])
+    batch = parts[0] in {"READ", "SECOND"} and "-" in parts[1]
+    key = "read_s=" if per_file else "max_s=" if batch else ""
+    if not key:
+        return False
+    value = _decimal_field(text, key)
+    return value is not None and SLOW_READ <= value < STALL
+
+
+def log_class(line: str) -> str:
+    if error_kinds(line):
+        return "error"
+    if is_slow_read(line):
+        return "warning"
+    return "normal"
 
 
 def append_text(path: str, text: str) -> None:
@@ -465,42 +521,42 @@ def cmd_run(args) -> int:
     command = [
         "caffeinate", "-i", binary,
         args.volume, str(first), str(args.groups), str(args.per),
-        f"{args.slow:.1f}", DETAIL, TIMES, ERRORS, str(maxf),
+        f"{args.slow:.1f}", NORMAL, TIMES, WARNINGS, ERRORS, str(maxf),
     ]
     print("Command:")
     print(" ".join(command))
-    print(f"Screen log: {SCREEN}")
-    print(f"Detail log: {DETAIL}")
+    print(f"Normal log: {NORMAL}")
+    print(f"Warnings log: {WARNINGS}")
     print(f"Error log: {ERRORS}")
     print(f"Files {first} through {last}.")
     if args.dry_run:
         print("Dry run. No writer was started.")
         return 0
     stamp = time.strftime("%Y-%m-%d %H:%M:%S")
-    with open(SCREEN, "a", encoding="utf-8") as screen:
-        screen.write(
+    with open(NORMAL, "a", encoding="utf-8") as normal:
+        normal.write(
             f"# run {stamp} first={first} groups={args.groups} per={args.per} "
             f"slow={args.slow:.1f} maxf={maxf}\n"
         )
-        screen.flush()
-        proc = subprocess.Popen(
-            command,
-            stdout=screen,
-            stderr=subprocess.STDOUT,
-            stdin=subprocess.DEVNULL,
-            start_new_session=True,
-            cwd=HERE,
-        )
+        normal.flush()
+    proc = subprocess.Popen(
+        command,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        stdin=subprocess.DEVNULL,
+        start_new_session=True,
+        cwd=HERE,
+    )
     print(f"Started writer pid {proc.pid}. Stopping this script does not stop it.")
     return 0
 
 
 def cmd_watch(_args) -> int:
-    if not os.path.isfile(SCREEN):
-        print(f"No screen log yet at {SCREEN}")
-        print("For the run already going: python3 seagate-media-test.py capture-live")
+    files = [path for path in (SCREEN, NORMAL, WARNINGS, ERRORS) if os.path.isfile(path)]
+    if not files:
+        print(f"No logs yet in {HERE}")
         return 1
-    os.execvp("tail", ["tail", "-n", "40", "-F", SCREEN])
+    os.execvp("tail", ["tail", "-n", "20", "-F", *files])
     return 1
 
 
@@ -516,24 +572,80 @@ def cmd_status(_args) -> int:
         print(f"Log copier pid {follower}.")
     else:
         print("No log copier is running.")
-    if os.path.isfile(SCREEN):
-        last = ""
-        with open(SCREEN, encoding="utf-8", errors="replace") as handle:
+    last = ""
+    for path, label in ((NORMAL, "normal"), (SCREEN, "screen")):
+        if not os.path.isfile(path):
+            continue
+        with open(path, encoding="utf-8", errors="replace") as handle:
             for line in handle:
                 if line.strip() and not line.startswith("#"):
                     last = line.rstrip("\n")
-        print(f"Last screen line: {last}")
-    else:
-        print(f"No screen log at {SCREEN}")
-    notes = 0
+        if last:
+            print(f"Last {label} line: {last}")
+            break
+    if not last:
+        print(f"No normal or screen log in {HERE}")
+    for path, label in ((WARNINGS, "Warning"), (ERRORS, "Error")):
+        notes = 0
+        if os.path.isfile(path):
+            with open(path, encoding="utf-8", errors="replace") as handle:
+                for line in handle:
+                    if line.strip() and not line.startswith("#"):
+                        notes += 1
+            print(f"{label} lines: {notes} in {path}")
+        else:
+            print(f"No {label.lower()} log at {path}")
+    return 0
+
+
+def cmd_classify(args) -> int:
+    """Split an existing detail log. Does not start a writer or touch the volume."""
+    if not os.path.isfile(args.detail):
+        print(f"No detail log at {args.detail}")
+        return 1
+    normal_lines = []
+    warn_lines = []
+    err_lines = []
+    with open(args.detail, encoding="utf-8", errors="replace") as handle:
+        for raw in handle:
+            line = raw.rstrip("\n")
+            if not line.strip() or line.startswith("#"):
+                continue
+            kind = log_class(line)
+            if kind == "error":
+                err_lines.append(line)
+            elif kind == "warning":
+                warn_lines.append(line)
+            else:
+                normal_lines.append(line)
+    with open(NORMAL, "w", encoding="utf-8") as handle:
+        handle.write("# Normal log. Fine results only. A slow write is normal.\n")
+        handle.write(f"# Built by classify from {args.detail}\n")
+        for line in normal_lines:
+            handle.write(line + "\n")
+    with open(WARNINGS, "w", encoding="utf-8") as handle:
+        handle.write("# Warnings. A read of 4.000 seconds or more that still matched.\n")
+        handle.write("# A matching second read is not a failure and does not get a third read.\n")
+        handle.write(f"# Built by classify from {args.detail}\n")
+        for line in warn_lines:
+            handle.write(line + "\n")
+    already = set()
     if os.path.isfile(ERRORS):
         with open(ERRORS, encoding="utf-8", errors="replace") as handle:
-            for line in handle:
-                if line.strip() and not line.startswith("#"):
-                    notes += 1
-        print(f"Error notifications: {notes} in {ERRORS}")
-    else:
-        print(f"No error log at {ERRORS}")
+            for raw in handle:
+                already.add(raw.rstrip("\n"))
+    added = 0
+    with open(ERRORS, "a", encoding="utf-8") as handle:
+        if not already:
+            handle.write("# Error log. Mismatches, partial files, rename failures, and 15.000 second stalls.\n")
+        for line in err_lines:
+            if line not in already:
+                handle.write(line + "\n")
+                added += 1
+    print(f"Normal lines: {len(normal_lines)} in {NORMAL}")
+    print(f"Warning lines: {len(warn_lines)} in {WARNINGS}")
+    print(f"Serious lines already recorded or added: {len(err_lines)} found, {added} appended to {ERRORS}")
+    print("No writer was started.")
     return 0
 
 
@@ -724,8 +836,9 @@ def cmd_self_test(_args) -> int:
     print("50 GB -> 4578 files, through 15688 if started at 11111")
     print("Fill to the last byte -> 4678 files, and that is too tight")
     print("File 11002 is not a finished name. File 11110 is.")
-    print("A 10.279 s write and an 8.180 s second read are not error-log lines.")
-    print("A partial, a mismatch, a non-zero bad count, and a 15.000 s I/O are.")
+    print("A 10.279 s write is normal. An 8.180 s second read is a warning.")
+    print("A read under 4.000 s is normal. A matching read of 4.000 s or more is a warning.")
+    print("A partial, a mismatch, a non-zero bad count, and a 15.000 s I/O are errors.")
     return 0
 
 
@@ -767,6 +880,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     test = sub.add_parser("self-test", help="Check the reserve arithmetic. Does not touch the drive")
     test.set_defaults(func=cmd_self_test)
+
+    classify = sub.add_parser("classify", help="Split a detail log into normal, warnings, and errors. Does not start a writer")
+    classify.add_argument("--detail", default=DETAIL)
+    classify.set_defaults(func=cmd_classify)
     return parser
 
 

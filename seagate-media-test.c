@@ -21,12 +21,15 @@
  * "good but slow" names are read again. A match becomes "good twice but slow N".
  * A second read that matches does not get a third read.
  *
- * Screen lines go to stdout. The same lines, plus one line per file, go to the
- * detail log. The error log gets only real failures and a single file I/O of
- * 15 seconds or more. Needing a second read is not an error.
+ * Version 0.91 writes three logs. A line goes to one of them.
+ *   NORMAL    Successful work. A slow write is normal. It is not a warning.
+ *   WARNINGS  A read or second read of 4.000 seconds or more that still matched.
+ *             That read does not get another read after the second one.
+ *   ERRORS    A mismatch, a partial file left in place, a rename failure, a
+ *             non-zero bad count, or any single-file I/O of 15.000 seconds or more.
  *
  * Arguments:
- *   seagate-media-test-bin VOLUME FIRST GROUPS PER SLOW_SEC DETAIL TIMES ERRORS MAXF
+ *   seagate-media-test-bin VOLUME FIRST GROUPS PER SLOW_SEC NORMAL TIMES WARNINGS ERRORS MAXF
  *
  * FIRST is the first file number. GROUPS sets of PER files are visited.
  * PER must be a multiple of 10. MAXF is one past the highest file number whose
@@ -48,10 +51,12 @@
 #define CHUNK (4u * 1024u * 1024u)
 #define PAGE 4096u
 #define STALL_SEC 15.0
+#define SLOW_READ_SEC 4.0
 
 enum { ST_MISSING, ST_PARTIAL, ST_UNTESTED, ST_GOOD, ST_SLOW, ST_TWICE, ST_FAIL, ST_FAIL2 };
 
 static FILE *logf;
+static FILE *warnf;
 static FILE *errf;
 static const char *vol = "/Volumes/2020 Seagate 8TB";
 static double slow_sec = 4.5;
@@ -69,6 +74,14 @@ static void log_line(const char *line) {
     fputs(line, logf);
     fputc('\n', logf);
     fflush(logf);
+}
+
+static void note_warn(const char *line) {
+    if (!warnf)
+        return;
+    fputs(line, warnf);
+    fputc('\n', warnf);
+    fflush(warnf);
 }
 
 static void note_error(const char *line) {
@@ -93,9 +106,7 @@ static int field_double(const char *line, const char *key, double *out) {
     return sscanf(p + strlen(key), "%lf", out) == 1;
 }
 
-/* A slow file that only needs a second read is not an error.
- * Copy a summary only when a file failed, or when one I/O reached the
- * 15 second USB-bridge stall. */
+/* A matching slow read is a warning. A failure, or a 15 second stall, is an error. */
 static int summary_is_error(const char *line) {
     double maxs;
     int bad, wb, rb, sb;
@@ -112,12 +123,54 @@ static int summary_is_error(const char *line) {
     return 0;
 }
 
+static int line_is_slow_read(const char *line) {
+    double secs;
+    int bad = 0;
+    if (strncmp(line, "R ", 2) == 0 ||
+        (strncmp(line, "SECOND ", 7) == 0 && strstr(line, " read_s=") != NULL &&
+         strchr(line, '-') == NULL)) {
+        if (!field_double(line, " read_s=", &secs))
+            return 0;
+        return secs >= SLOW_READ_SEC && secs < STALL_SEC;
+    }
+    if (strncmp(line, "READ ", 5) == 0 ||
+        (strncmp(line, "SECOND ", 7) == 0 && strstr(line, " max_s=") != NULL)) {
+        if (field_int(line, " bad=", &bad) && bad != 0)
+            return 0;
+        if (!field_double(line, " max_s=", &secs))
+            return 0;
+        return secs >= SLOW_READ_SEC && secs < STALL_SEC;
+    }
+    return 0;
+}
+
+static int line_is_error(const char *line) {
+    double secs;
+    if (strncmp(line, "BAD ", 4) == 0 || strncmp(line, "STALL ", 6) == 0)
+        return 1;
+    if (summary_is_error(line))
+        return 1;
+    if (field_double(line, " read_s=", &secs) && secs >= STALL_SEC)
+        return 1;
+    if (field_double(line, " total_s=", &secs) && secs >= STALL_SEC)
+        return 1;
+    return 0;
+}
+
+/* One line, one log. Stdout still gets the summary lines. */
+static void file_log(const char *line) {
+    if (line_is_error(line))
+        note_error(line);
+    else if (line_is_slow_read(line))
+        note_warn(line);
+    else
+        log_line(line);
+}
+
 static void show(const char *line) {
-    log_line(line);
+    file_log(line);
     puts(line);
     fflush(stdout);
-    if (strncmp(line, "BAD ", 4) == 0 || summary_is_error(line))
-        note_error(line);
 }
 
 static uint8_t fill_byte(unsigned file_no) {
@@ -392,7 +445,7 @@ static int read_first(unsigned num, double *secs) {
     note_stall("R", num, read_s);
     snprintf(line, sizeof line, "R %05u read_s=%.3f MBps=%.1f %s",
              num, read_s, (SIZE / 1e6) / read_s, slow ? "good-but-slow" : "good");
-    log_line(line);
+    file_log(line);
     return 0;
 }
 
@@ -420,7 +473,7 @@ static int read_second(unsigned num, double *secs) {
     }
     note_stall("SECOND", num, read_s);
     snprintf(line, sizeof line, "SECOND %05u read_s=%.3f MBps=%.1f OK", num, read_s, (SIZE / 1e6) / read_s);
-    log_line(line);
+    file_log(line);
     return 0;
 }
 
@@ -451,7 +504,7 @@ static void read_untested_ten(unsigned first, double origin, int *read_bad) {
 
 static void usage(void) {
     fprintf(stderr,
-            "usage: seagate-media-test-bin VOLUME FIRST GROUPS PER SLOW_SEC DETAIL TIMES ERRORS MAXF\n"
+            "usage: seagate-media-test-bin VOLUME FIRST GROUPS PER SLOW_SEC NORMAL TIMES WARNINGS ERRORS MAXF\n"
             "Run seagate-media-test.py instead. It documents plan, run, watch, and capture-live.\n");
 }
 
@@ -482,15 +535,15 @@ static int parse_d(const char *s, double *out) {
 int main(int argc, char **argv) {
     char line[320];
     unsigned first, groups, per, last;
-    if (argc != 10) {
+    if (argc != 11) {
         usage();
         return 2;
     }
     vol = argv[1];
     if (parse_u(argv[2], &first) || parse_u(argv[3], &groups) ||
         parse_u(argv[4], &per) || parse_d(argv[5], &slow_sec) ||
-        parse_u(argv[9], &maxf) || !argv[1][0] || !argv[6][0] ||
-        !argv[7][0] || !argv[8][0]) {
+        parse_u(argv[10], &maxf) || !argv[1][0] || !argv[6][0] ||
+        !argv[7][0] || !argv[8][0] || !argv[9][0]) {
         usage();
         return 2;
     }
@@ -509,10 +562,17 @@ int main(int argc, char **argv) {
         perror(argv[6]);
         return 1;
     }
-    errf = fopen(argv[8], "a");
-    if (!errf) {
+    warnf = fopen(argv[8], "a");
+    if (!warnf) {
         perror(argv[8]);
         fclose(logf);
+        return 1;
+    }
+    errf = fopen(argv[9], "a");
+    if (!errf) {
+        perror(argv[9]);
+        fclose(logf);
+        fclose(warnf);
         return 1;
     }
     time_of = calloc(maxf, sizeof time_of[0]);
@@ -580,7 +640,7 @@ int main(int argc, char **argv) {
                     note_stall("W", num, total);
                     snprintf(line, sizeof line, "W %05u total_s=%.3f MBps=%.1f",
                              num, total, (SIZE / 1e6) / total);
-                    log_line(line);
+                    file_log(line);
                     nums[nwrite] = num;
                     secs[nwrite] = total;
                     nwrite++;
@@ -654,6 +714,8 @@ int main(int argc, char **argv) {
              groups * per, now() - run_t0, run_bad);
     show(line);
     fclose(logf);
+    if (warnf)
+        fclose(warnf);
     if (errf)
         fclose(errf);
     free(time_of);

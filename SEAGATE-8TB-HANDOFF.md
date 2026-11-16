@@ -1,6 +1,63 @@
 # Seagate 8TB handoff
 
-Written 2026-11-15. Updated 2026-11-16 when nine more groups started. Read this before touching the drive, ending the test, or starting another one.
+Written 2026-11-15. Updated 2026-11-16 for version 0.91. Read this before touching the drive, ending the test, or starting another one.
+
+## Finish this yourself (version 0.91)
+
+The test that is already running finishes on its own. Leave it alone. Do not start a second writer. Do not watch it from a chat session. The program and the notes are in this folder:
+
+`/Users/garnetchaney/fix/seagate_disk_fix`
+
+Version 0.91 is the copy you run. The public repo is https://github.com/garnetr/seagate_disk_fix and the tag is `v0.91`.
+
+What is running now, and must keep running:
+
+- Writer pid 68132, parent pid 1: `/tmp/seagate-groups-15610`
+- `caffeinate` pid 68133, child of the writer
+- Log copier pid 79128: `seagate-media-test.py _follow` in this folder
+- Range: files 11111–15610, nine groups of 500. Stop at 15610.
+- When this note was written, group 5 of 9 (files 13111–13610) was still on its first pass. The last line in `seagate-screen.log` was `READ 13561-13570`, elapsed 75 min 12 s into group 5, `bad=0`. The copier has kept appending after that line.
+
+That writer is the older binary. It does not know about the version 0.91 log split. Its screen copy is `seagate-screen.log`. Its per-file copy is `seagate-detail.log`. Both are in this folder, so they survive a reboot of the Mac even though `/tmp` does not. `seagate-errors.log` is for real failures from that run. A slow read is not written there.
+
+Check it without starting anything:
+
+```bash
+cd /Users/garnetchaney/fix/seagate_disk_fix
+python3 seagate-media-test.py status
+```
+
+Sort the detail log into the three version 0.91 logs when you want that view. This reads a log file. It does not start a writer:
+
+```bash
+python3 seagate-media-test.py classify
+```
+
+- `seagate-normal.log` — fine results, including a slow write and a file that only needs its second read
+- `seagate-warnings.log` — a read or second read of 4.000 seconds or more that still matched. It is not a failure. A matching second read does not get a third read.
+- `seagate-errors.log` — a mismatch, a partial file left in place, a rename failure, a non-zero bad count, or any single-file I/O of 15.000 seconds or more
+
+To watch the logs yourself, `python3 seagate-media-test.py watch`. Stopping that tail does not stop the writer.
+
+When pid 68132 is gone, the copier appends one `# follow stopped` line and exits. The names on `/Volumes/2020 Seagate 8TB` are the record that survives. Do not start `run` until `status` says no writer is running. A later run uses version 0.91 and writes the three logs directly:
+
+```bash
+python3 seagate-media-test.py plan
+python3 seagate-media-test.py run --groups N
+```
+
+`plan` is how many more files fit at a 30, 40, or 50 GB reserve. Filling to the last byte is too tight. This run still stops at file 15610. Do not pass 15610 unless you decide to.
+
+Leave these alone:
+
+- One writer only. The script refuses to start a second one.
+- `untested area 11002` is short, 352,321,536 bytes. Do not delete it.
+- Files 00001–00600 are solid 0xFF from an older program. A finished name is skipped.
+- Files 01138 and 01244 still need a cold re-read. Their earlier reads were fast enough to be the OS cache. Do that only while no writer is running.
+- Do not turn Wi-Fi on. The working path is the USB Ethernet adapter.
+- Do not erase the disk, run First Aid, run fsck, or rewrite a file that already passed.
+
+The older sections below are the record of how the drive got here. The instructions in this section are the ones to follow.
 
 ## Run in progress: files 11111–15610
 
